@@ -1,66 +1,31 @@
-version: "3.8"
-
 services:
   compose-guardian:
-    # Pull from a remote registry (recommended) instead of building locally.
-    #
-    # Examples:
-    # - GHCR: ghcr.io/<owner>/compose-guardian:main
-    # - Docker Hub: docker.io/<user>/compose-guardian:latest
-    image: ${COMPOSE_GUARDIAN_IMAGE:-ghcr.io/<owner>/compose-guardian:main}
-
-    container_name: ${COMPOSE_GUARDIAN_CONTAINER_NAME:-compose-guardian}
-
-    environment:
-      # Path to the compose file *inside this container*.
-      # Make sure the directory is mounted to match this path.
-      COMPOSE_FILE: ${COMPOSE_FILE:-/compose/docker-compose.yml}
-
-      # Optional: compose project name (same as `docker compose -p ...`).
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-mystack}
-
-      # Scheduling:
-      # - If SCHEDULE_CRON is set, it is used (cron format, 5 fields).
-      # - Else if SCHEDULE_EVERY is set, it is used (e.g. 12h, 30m).
-      # - Else: run once and exit.
-      SCHEDULE_CRON: ${SCHEDULE_CRON:-0 3 * * *}
-      # SCHEDULE_EVERY: ${SCHEDULE_EVERY:-12h}
-
-      # Comma-separated service names to ignore.
-      IGNORE_SERVICES: ${IGNORE_SERVICES:-db,redis}
-
-      # Verification/health options.
-      HEALTH_TIMEOUT_SECONDS: ${HEALTH_TIMEOUT_SECONDS:-180}
-      STABLE_SECONDS: ${STABLE_SECONDS:-30}
-      VERIFY_POLL_SECONDS: ${VERIFY_POLL_SECONDS:-3}
-
-      # Where JSON reports are written inside the container.
-      REPORT_DIR: ${REPORT_DIR:-/reports}
-
-      # Optional: DingTalk robot webhook for notifications.
-      # Example: https://oapi.dingtalk.com/robot/send?access_token=xxx
-      DINGTALK_WEBHOOK: ${DINGTALK_WEBHOOK:-}
-
-      # Optional: timezone for logs and cron scheduling.
-      TZ: ${TZ:-Asia/Shanghai}
-
-    volumes:
-      # Required: Docker socket, so the updater can run docker/compose commands.
-      - /var/run/docker.sock:/var/run/docker.sock
-
-      # Required: mount your target compose directory.
-      # It must contain the compose file referenced by COMPOSE_FILE.
-      - ${COMPOSE_DIR:-/opt/mystack}:/compose
-
-      # Optional: persist reports on the host.
-      - ${REPORT_DIR_HOST:-/opt/compose-guardian/reports}:${REPORT_DIR:-/reports}
-
-    healthcheck:
-      # Basic sanity check: ensure this container can talk to the Docker daemon.
-      test: ["CMD-SHELL", "docker info >/dev/null 2>&1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
+    image: ghcr.io/<owner>/compose-guardian:main
+    container_name: compose-guardian
+    hostname: compose-guardian
     restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/mystack:/compose
+      - /opt/compose-guardian/reports:/reports
+    networks:
+      - blog
+    environment:
+      - COMPOSE_FILE=/compose/docker-compose.yml # Compose 文件在容器内的路径（需与 /compose 挂载一致）
+      - COMPOSE_PROJECT_NAME=mystack # 可选：等同于 docker compose -p 的项目名
+      - SCHEDULE_CRON=0 3 * * * # 可选：cron 表达式（5 段），用于定时执行
+      # - SCHEDULE_EVERY=12h # 可选：间隔执行（如 12h/30m）；未设置 SCHEDULE_CRON 时生效
+      - IGNORE_SERVICES=db,redis # 可选：忽略的服务名，逗号分隔
+      - HEALTH_TIMEOUT_SECONDS=180 # 可选：健康检查超时时间（秒）
+      - STABLE_SECONDS=30 # 可选：无 HEALTHCHECK 时，要求 RestartCount 稳定的持续秒数
+      - VERIFY_POLL_SECONDS=3 # 可选：验证轮询间隔（秒）
+      - REPORT_DIR=/reports # 可选：报告输出目录（容器内路径）
+      - DINGTALK_WEBHOOK= # 可选：钉钉机器人 webhook（留空则不通知）
+      - TZ=Asia/Shanghai # 容器时区
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+
+networks:
+  blog: {}
