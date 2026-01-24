@@ -1,41 +1,29 @@
 services:
   compose-guardian:
-    image: ghcr.io/<owner>/compose-guardian:main
+    image: ghcr.io/jasonchio-cn/compose-guardian:latest
     container_name: compose-guardian
     restart: unless-stopped
-
-    # 必须：让容器内的 compose-guardian 能控制宿主机 Docker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-
       # 必须：把你所有 compose 栈的根目录挂载进来（容器内路径由 COMPOSE_ROOT 决定）
       # 建议只读挂载：守护进程只需要读取 compose 文件/相关 env 文件
       - /opt/compose/projects:/compose/projects:ro
-
-      # 可选：报告落盘
-      - /opt/compose-guardian/reports:/reports
-
+      - /opt/compose-guardian/reports:/reports       # 可选：报告落盘
     environment:
       COMPOSE_ROOT: /compose/projects
-
       # 调度：二选一
       SCHEDULE_CRON: "0 3 * * *"
       # SCHEDULE_EVERY: 12h
-
       # 可选：忽略某些服务（逗号分隔）
       IGNORE_SERVICES: db,redis
-
       # 可选：健康检查/验证参数
       HEALTH_TIMEOUT_SECONDS: "180"
       STABLE_SECONDS: "30"
       VERIFY_POLL_SECONDS: "3"
-
       # 报告与通知
       REPORT_DIR: /reports
       DINGTALK_WEBHOOK: ""
-
       TZ: Asia/Shanghai
-
     logging:
       driver: json-file
       options:
