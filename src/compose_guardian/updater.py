@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -8,6 +7,14 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .reporting import Report, write_report
+
+
+COMPOSE_FILENAMES = [
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+]
 
 
 def _ts() -> str:
@@ -24,18 +31,18 @@ def _run(cmd: List[str], *, check: bool = True, capture: bool = True) -> subproc
     )
 
 
-def _compose_base() -> List[str]:
-    compose_file = os.getenv("COMPOSE_FILE", "/compose/docker-compose.yml")
-    project = os.getenv("COMPOSE_PROJECT_NAME", "").strip()
-    base = ["docker", "compose"]
-    if project:
-        base += ["-p", project]
-    base += ["-f", compose_file]
+def _stack_name(compose_file: str) -> str:
+    # Default stack label: use the parent directory name
+    return os.path.basename(os.path.dirname(compose_file.rstrip("/\\"))) or compose_file
+
+
+def _compose_base(compose_file: str) -> List[str]:
+    base = ["docker", "compose", "--project-directory", os.path.dirname(compose_file), "-f", compose_file]
     return base
 
 
-def _compose(cmd: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    return _run(_compose_base() + cmd, check=check)
+def _compose(compose_file: str, cmd: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    return _run(_compose_base(compose_file) + cmd, check=check)
 
 
 def _docker(cmd: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
@@ -62,8 +69,47 @@ def _ignore_set() -> set:
     return {p for p in parts if p}
 
 
-def _get_services_images() -> Dict[str, str]:
-    cfg = _compose(["config", "--format", "json"]).stdout
+def _discover_compose_files(root: str) -> List[str]:
+    root = (root or "").strip()
+    if not root or not os.path.isdir(root):
+        return []
+
+    out: List[str] = []
+
+    # Support root itself containing a compose file.
+    for name in COMPOSE_FILENAMES:
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            out.append(p)
+            break
+
+    # Scan one level down: /root/*/docker-compose.yml (or compose.yml)
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: e.name)
+    except FileNotFoundError:
+        return []
+
+    for ent in entries:
+        if not ent.is_dir():
+            continue
+        for name in COMPOSE_FILENAMES:
+            p = os.path.join(ent.path, name)
+            if os.path.isfile(p):
+                out.append(p)
+                break
+
+    return out
+
+
+def _stack_is_up(compose_file: str) -> bool:
+    # Define "up" as: at least one running container in this stack.
+    # If nothing is running, skip to avoid bringing up stacks that were never started.
+    p = _compose(compose_file, ["ps", "-q", "--status", "running"], check=False)
+    return bool((p.stdout or "").strip())
+
+
+def _get_services_images(compose_file: str) -> Dict[str, str]:
+    cfg = _compose(compose_file, ["config", "--format", "json"], check=True).stdout
     data = json.loads(cfg)
     services = data.get("services", {})
     out: Dict[str, str] = {}
@@ -74,10 +120,10 @@ def _get_services_images() -> Dict[str, str]:
     return out
 
 
-def _service_container_ids(services: List[str]) -> Dict[str, List[str]]:
+def _service_container_ids(compose_file: str, services: List[str]) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
     for svc in services:
-        p = _compose(["ps", "-q", svc], check=False)
+        p = _compose(compose_file, ["ps", "-q", svc], check=False)
         ids = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
         out[svc] = ids
     return out
@@ -101,7 +147,7 @@ def _container_health_info(ins: dict) -> Tuple[str, Optional[str], int]:
     return status, health, int(restart_count)
 
 
-def _verify_services(services: List[str]) -> Tuple[bool, str]:
+def _verify_services(compose_file: str, services: List[str]) -> Tuple[bool, str]:
     timeout = int(os.getenv("HEALTH_TIMEOUT_SECONDS", "180"))
     stable_seconds = int(os.getenv("STABLE_SECONDS", "30"))
     poll = int(os.getenv("VERIFY_POLL_SECONDS", "3"))
@@ -113,7 +159,7 @@ def _verify_services(services: List[str]) -> Tuple[bool, str]:
     restart_baseline: Dict[str, int] = {}
 
     while time.time() - start <= timeout:
-        svc_cids = _service_container_ids(services)
+        svc_cids = _service_container_ids(compose_file, services)
         all_ok = True
         reason = ""
 
@@ -180,10 +226,10 @@ def _dingtalk_send(title: str, text: str) -> None:
         return
 
 
-def run_once() -> None:
-    compose_file = os.getenv("COMPOSE_FILE", "/compose/docker-compose.yml")
+def _run_once_for_compose(compose_file: str) -> None:
     ignore = _ignore_set()
     ts_compact = datetime.now().strftime("%Y%m%dT%H%M%S")
+    stack = _stack_name(compose_file)
 
     report = Report(
         timestamp=ts_compact,
@@ -192,7 +238,13 @@ def run_once() -> None:
     )
 
     try:
-        services_images = _get_services_images()
+        if not _stack_is_up(compose_file):
+            report.status = "SKIPPED"
+            report.message = "stack not up (no running containers)"
+            write_report(report)
+            return
+
+        services_images = _get_services_images(compose_file)
         for svc in list(services_images.keys()):
             if svc in ignore:
                 services_images.pop(svc, None)
@@ -208,17 +260,32 @@ def run_once() -> None:
         before_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
         report.before_image_ids = before_ids
 
-        _compose(["pull"], check=False)
+        _compose(compose_file, ["pull"], check=False)
 
         after_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
         report.after_image_ids = after_ids
 
-        changed = [svc for svc in services_images.keys() if before_ids.get(svc, "") != after_ids.get(svc, "")]
+        changed: List[str] = []
+        skipped_no_id: List[str] = []
+        for svc in services_images.keys():
+            b = (before_ids.get(svc, "") or "").strip()
+            a = (after_ids.get(svc, "") or "").strip()
+            if not b or not a:
+                skipped_no_id.append(svc)
+                continue
+            if b != a:
+                changed.append(svc)
+
         report.changed_services = changed
 
         if not changed:
             report.status = "SKIPPED"
-            report.message = "no image updates detected"
+            if skipped_no_id:
+                report.message = "no image updates detected (some services missing image id: %s)" % ",".join(
+                    skipped_no_id
+                )
+            else:
+                report.message = "no image updates detected"
             write_report(report)
             return
 
@@ -236,9 +303,9 @@ def run_once() -> None:
         report.backup_tags = backups
 
         # Apply update for changed services only.
-        _compose(["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
+        _compose(compose_file, ["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
 
-        ok, why = _verify_services(changed)
+        ok, why = _verify_services(compose_file, changed)
         report.verify_ok = ok
         report.verify_message = why
 
@@ -254,15 +321,15 @@ def run_once() -> None:
                 if bid:
                     _docker(["image", "tag", bid, img], check=False)
 
-            _compose(["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
-            rok, rwhy = _verify_services(changed)
+            _compose(compose_file, ["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
+            rok, rwhy = _verify_services(compose_file, changed)
             report.rollback_verify_ok = rok
             report.rollback_verify_message = rwhy
             report.status = "ROLLBACK" if rok else "FAILED"
 
             write_report(report)
 
-            title = f"Compose Update {report.status}"
+            title = f"[{stack}] Compose Update {report.status}"
             text = _format_dingtalk(report)
             _dingtalk_send(title, text)
             return
@@ -283,7 +350,7 @@ def run_once() -> None:
         report.status = "SUCCESS"
         write_report(report)
 
-        title = "Compose Update SUCCESS"
+        title = f"[{stack}] Compose Update SUCCESS"
         text = _format_dingtalk(report)
         _dingtalk_send(title, text)
 
@@ -292,9 +359,29 @@ def run_once() -> None:
         report.message = f"exception: {type(e).__name__}: {e}"
         write_report(report)
 
-        title = "Compose Update FAILED"
+        title = f"[{stack}] Compose Update FAILED"
         text = _format_dingtalk(report)
         _dingtalk_send(title, text)
+
+
+def run_once() -> None:
+    root = os.getenv("COMPOSE_ROOT", "/compose/projects").strip() or "/compose/projects"
+    compose_files = _discover_compose_files(root)
+
+    if not compose_files:
+        ts_compact = datetime.now().strftime("%Y%m%dT%H%M%S")
+        report = Report(
+            timestamp=ts_compact,
+            compose_file=root,
+            ignored_services=sorted(_ignore_set()),
+            status="SKIPPED",
+            message=f"no compose files found under COMPOSE_ROOT={root}",
+        )
+        write_report(report)
+        return
+
+    for compose_file in compose_files:
+        _run_once_for_compose(compose_file)
 
 
 def _format_dingtalk(report: Report) -> str:
