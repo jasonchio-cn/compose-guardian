@@ -26,4 +26,4 @@ ENV SCHEDULE_CRON=
 ENV SCHEDULE_EVERY=
 ENV DINGTALK_WEBHOOK=
 
-CMD ["python", "-m", "compose_updater.main"]
+CMD ["python", "-m", "compose_guardian.main"]
