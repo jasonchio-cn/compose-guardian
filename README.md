@@ -11,7 +11,7 @@
 1) 拉取镜像（将 `<owner>` 替换为你的 GitHub 用户名/组织名）：
 
 ```bash
-docker pull ghcr.io/<owner>/compose-guardian:main
+docker pull ghcr.io/<owner>/compose-guardian:latest
 ```
 
 2) 如果你的镜像仓库是私有的，需要先登录：
@@ -46,7 +46,7 @@ cp docker-compose.example.yml docker-compose.yml
 
 - `volumes` 里的 `/opt/mystack:/compose`：把你的 Compose 栈目录挂载进来。
 - `COMPOSE_FILE`：必须是 "容器内" 的 compose 文件路径（例如 `/compose/docker-compose.yml`）。
-- `REPORT_DIR` 与报告目录挂载：用于把每次运行的 JSON 报告持久化到宿主机。
+- 报告目录挂载：用于把每次运行的 JSON 报告持久化到宿主机（示例是 `/opt/compose-guardian/reports:/reports`）。
 
 3) 启动：
 
@@ -68,7 +68,7 @@ docker compose up -d
 - 回滚：仅回滚变更的服务；将原 tag 恢复指向备份镜像，再次对变更服务执行 `up -d --force-recreate --no-deps`。
 - 清理：更新成功后删除备份 tag；并在无容器引用时清理旧 image ID。
 - 通知：在 SUCCESS/ROLLBACK/FAILED 时发送钉钉通知；SKIPPED（无更新）不发送。
-- 报告：每次运行会将 JSON 报告写入 `REPORT_DIR`。
+- 报告：每次运行会将 JSON 报告写入容器内 `/reports`（建议挂载到宿主机持久化）。
 
 ## 配置（环境变量）
 
@@ -89,8 +89,6 @@ docker compose up -d
   - 当服务没有 `HEALTHCHECK` 时，用于判断 "RestartCount 稳定" 的持续时间。
 - `VERIFY_POLL_SECONDS`（默认：`3`）
   - 健康验证轮询间隔（秒）。
-- `REPORT_DIR`（默认：`/reports`）
-  - 报告写入目录（容器内路径）。
 - `DINGTALK_WEBHOOK`（可选）
   - 钉钉机器人 webhook；留空则不通知。
 

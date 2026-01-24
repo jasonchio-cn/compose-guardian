@@ -1,6 +1,6 @@
 services:
   compose-guardian:
-    image: ghcr.io/<owner>/compose-guardian:main
+    image: ghcr.io/<owner>/compose-guardian:latest
     container_name: compose-guardian
     hostname: compose-guardian
     restart: unless-stopped
@@ -12,14 +12,13 @@ services:
       - blog
     environment:
       - COMPOSE_FILE=/compose/docker-compose.yml # Compose 文件在容器内的路径（需与 /compose 挂载一致）
-      - COMPOSE_PROJECT_NAME=mystack # 可选：等同于 docker compose -p 的项目名
+      - COMPOSE_PROJECT_NAME=mystack # 可选：等同于 docker compose -p 的项目名（建议与原栈保持一致）
       - SCHEDULE_CRON=0 3 * * * # 可选：cron 表达式（5 段），用于定时执行
       # - SCHEDULE_EVERY=12h # 可选：间隔执行（如 12h/30m）；未设置 SCHEDULE_CRON 时生效
       - IGNORE_SERVICES=db,redis # 可选：忽略的服务名，逗号分隔
       - HEALTH_TIMEOUT_SECONDS=180 # 可选：健康检查超时时间（秒）
       - STABLE_SECONDS=30 # 可选：无 HEALTHCHECK 时，要求 RestartCount 稳定的持续秒数
       - VERIFY_POLL_SECONDS=3 # 可选：验证轮询间隔（秒）
-      - REPORT_DIR=/reports # 可选：报告输出目录（容器内路径）
       - DINGTALK_WEBHOOK= # 可选：钉钉机器人 webhook（留空则不通知）
       - TZ=Asia/Shanghai # 容器时区
     logging:

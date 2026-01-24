@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/compose-watchdog
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/compose-guardian
 
 jobs:
   build:
@@ -43,6 +43,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
         uses: docker/build-push-action@v6

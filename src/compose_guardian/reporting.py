@@ -31,7 +31,7 @@ class Report:
 
 
 def write_report(report: Report) -> str:
-    report_dir = os.getenv("REPORT_DIR", "/reports")
+    report_dir = "/reports"
     os.makedirs(report_dir, exist_ok=True)
 
     name = f"{report.timestamp}_{report.status.lower() or 'unknown'}.json"
