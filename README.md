@@ -1,7 +1,7 @@
 # Compose Guardian - Docker Compose 自动更新守护者
 
 ![GitHub License](https://img.shields.io/github/license/jasonchio-cn/compose-guardian)
-![Docker Image Size](https://img.shields.io/docker/image-size/ghcr.io/jasonchio-cn/compose-guardian)
+![Docker Image Size](https://img.shields.io/docker/image-size/jasonchio/compose-guardian)
 
 **Compose Guardian** 是一个智能的 Docker Compose 服务自动更新工具。它会监控您的 compose 项目，自动拉取最新的镜像并安全地更新服务，同时提供完整的回滚机制和健康检查。
 
@@ -28,7 +28,7 @@
 version: '3.8'
 services:
   compose-guardian:
-    image: ghcr.io/jasonchio-cn/compose-guardian:latest
+    image: jasonchio/compose-guardian:latest
     container_name: compose-guardian
     volumes:
       # 挂载 Docker socket 以管理容器
@@ -68,7 +68,7 @@ docker run -d \
   -v /opt/compose-guardian/reports:/reports \
   -e COMPOSE_ROOT=/compose/projects \
   -e SCHEDULE_EVERY=1h \
-  ghcr.io/jasonchio-cn/compose-guardian:latest
+  jasonchio/compose-guardian:latest
 ```
 
 ### 手动控制更新（运行一次后退出）
@@ -80,7 +80,7 @@ docker run -d \
 version: '3.8'
 services:
   compose-guardian:
-    image: ghcr.io/jasonchio-cn/compose-guardian:latest
+    image: jasonchio/compose-guardian:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /opt/compose/projects:/compose/projects:ro
@@ -103,7 +103,7 @@ docker run --rm \
   -v /opt/compose/projects:/compose/projects:ro \
   -v /opt/compose-guardian/reports:/reports \
   -e COMPOSE_ROOT=/compose/projects \
-  ghcr.io/jasonchio-cn/compose-guardian:latest
+  jasonchio/compose-guardian:latest
 ```
 
 ## ⚙️ 环境变量配置
@@ -202,7 +202,7 @@ environment:
       -v /var/run/docker.sock:/var/run/docker.sock \
       -v ${{ github.workspace }}:/compose/projects:ro \
       -e COMPOSE_ROOT=/compose/projects \
-      ghcr.io/jasonchio-cn/compose-guardian:latest
+      jasonchio/compose-guardian:latest
 ```
 
 ### 场景3：手动触发更新

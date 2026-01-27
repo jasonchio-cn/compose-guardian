@@ -12,7 +12,7 @@ permissions:
 
 env:
   # Change to Docker Hub registry
-  IMAGE_NAME: ${{ github.repository_owner }}/compose-guardian
+  IMAGE_NAME: jasonchio/compose-guardian
 
 jobs:
   build:
