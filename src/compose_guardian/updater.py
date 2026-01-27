@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import subprocess
 import time
@@ -7,6 +8,13 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from .reporting import Report, write_report
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 COMPOSE_FILENAMES = [
@@ -231,6 +239,11 @@ def _run_once_for_compose(compose_file: str) -> None:
     ts_compact = datetime.now().strftime("%Y%m%dT%H%M%S")
     stack = _stack_name(compose_file)
 
+    logger.info(f"开始处理 compose 文件: {compose_file}")
+    logger.info(f"堆栈名称: {stack}")
+    if ignore:
+        logger.info(f"忽略的服务: {', '.join(sorted(ignore))}")
+
     report = Report(
         timestamp=ts_compact,
         compose_file=compose_file,
@@ -241,6 +254,7 @@ def _run_once_for_compose(compose_file: str) -> None:
         if not _stack_is_up(compose_file):
             report.status = "SKIPPED"
             report.message = "stack not up (no running containers)"
+            logger.info(f"跳过 {stack}: 堆栈未启动（没有运行中的容器）")
             write_report(report)
             return
 
@@ -250,16 +264,19 @@ def _run_once_for_compose(compose_file: str) -> None:
                 services_images.pop(svc, None)
 
         report.services = {svc: {"image": img} for svc, img in services_images.items()}
+        logger.info(f"发现服务: {', '.join(services_images.keys())}")
 
         if not services_images:
             report.status = "SKIPPED"
             report.message = "no services with image after applying ignore list"
+            logger.info(f"跳过 {stack}: 应用忽略列表后没有带镜像的服务")
             write_report(report)
             return
 
         before_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
         report.before_image_ids = before_ids
 
+        logger.info(f"正在拉取最新镜像...")
         _compose(compose_file, ["pull"], check=False)
 
         after_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
@@ -284,12 +301,15 @@ def _run_once_for_compose(compose_file: str) -> None:
                 report.message = "no image updates detected (some services missing image id: %s)" % ",".join(
                     skipped_no_id
                 )
+                logger.info(f"跳过 {stack}: 未检测到镜像更新（某些服务缺少镜像ID: {', '.join(skipped_no_id)}）")
             else:
                 report.message = "no image updates detected"
+                logger.info(f"跳过 {stack}: 未检测到镜像更新")
             write_report(report)
             return
 
         # Backup old images for changed services.
+        logger.info(f"检测到 {len(changed)} 个服务需要更新: {', '.join(changed)}")
         backups: Dict[str, str] = {}
         for svc in changed:
             img = services_images[svc]
@@ -303,13 +323,16 @@ def _run_once_for_compose(compose_file: str) -> None:
         report.backup_tags = backups
 
         # Apply update for changed services only.
+        logger.info(f"正在更新服务: {', '.join(changed)}")
         _compose(compose_file, ["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
 
+        logger.info(f"正在验证服务健康状态...")
         ok, why = _verify_services(compose_file, changed)
         report.verify_ok = ok
         report.verify_message = why
 
         if not ok:
+            logger.warning(f"服务验证失败，开始回滚: {why}")
             report.status = "ROLLING_BACK"
             # Roll back only changed services.
             for svc in changed:
@@ -321,6 +344,7 @@ def _run_once_for_compose(compose_file: str) -> None:
                 if bid:
                     _docker(["image", "tag", bid, img], check=False)
 
+            logger.info(f"正在回滚服务: {', '.join(changed)}")
             _compose(compose_file, ["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
             rok, rwhy = _verify_services(compose_file, changed)
             report.rollback_verify_ok = rok
@@ -332,9 +356,11 @@ def _run_once_for_compose(compose_file: str) -> None:
             title = f"[{stack}] Compose Update {report.status}"
             text = _format_dingtalk(report)
             _dingtalk_send(title, text)
+            logger.info(f"更新流程完成: {report.status}")
             return
 
         # Success: cleanup backup tags and old images.
+        logger.info(f"更新成功，正在清理备份镜像...")
         for svc in changed:
             btag = backups.get(svc)
             if btag:
@@ -353,6 +379,7 @@ def _run_once_for_compose(compose_file: str) -> None:
         title = f"[{stack}] Compose Update SUCCESS"
         text = _format_dingtalk(report)
         _dingtalk_send(title, text)
+        logger.info(f"更新流程完成: SUCCESS")
 
     except Exception as e:
         report.status = "FAILED"
@@ -366,9 +393,11 @@ def _run_once_for_compose(compose_file: str) -> None:
 
 def run_once() -> None:
     root = os.getenv("COMPOSE_ROOT", "/compose/projects").strip() or "/compose/projects"
+    logger.info(f"开始扫描 compose 文件，根目录: {root}")
     compose_files = _discover_compose_files(root)
 
     if not compose_files:
+        logger.warning(f"未找到任何 compose 文件，COMPOSE_ROOT={root}")
         ts_compact = datetime.now().strftime("%Y%m%dT%H%M%S")
         report = Report(
             timestamp=ts_compact,
@@ -380,8 +409,10 @@ def run_once() -> None:
         write_report(report)
         return
 
+    logger.info(f"发现 {len(compose_files)} 个 compose 文件: {[os.path.basename(f) for f in compose_files]}")
     for compose_file in compose_files:
         _run_once_for_compose(compose_file)
+    logger.info("所有 compose 文件处理完成")
 
 
 def _format_dingtalk(report: Report) -> str:

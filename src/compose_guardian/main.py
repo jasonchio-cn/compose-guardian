@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 from datetime import datetime, timezone
@@ -5,6 +6,13 @@ from datetime import datetime, timezone
 from croniter import croniter
 
 from .updater import run_once
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def _parse_every(value: str) -> int:
@@ -30,9 +38,13 @@ def main() -> None:
     schedule_cron = os.getenv("SCHEDULE_CRON", "").strip()
     schedule_every = os.getenv("SCHEDULE_EVERY", "").strip()
 
+    logger.info("Compose Guardian 启动")
+    
     if not schedule_cron and not schedule_every:
         # No schedule configured: run once and exit.
+        logger.info("未配置调度参数，执行一次后退出")
         run_once()
+        logger.info("执行完成，退出程序")
         return
 
     if schedule_cron:

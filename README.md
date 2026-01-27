@@ -1,96 +1,83 @@
-# compose-guardian
+# Compose Guardian - Docker Compose 自动更新守护者
 
-一个容器化的 Docker Compose "守护者"：扫描根目录下的多个 Compose 服务栈，**仅更新已经启动的服务栈**（定义为：至少有一个正在运行的容器）。
+![GitHub License](https://img.shields.io/github/license/jasonchio-cn/compose-guardian)
+![Docker Image Size](https://img.shields.io/docker/image-size/ghcr.io/jasonchio-cn/compose-guardian)
 
-## 更新流程
+**Compose Guardian** 是一个智能的 Docker Compose 服务自动更新工具。它会监控您的 compose 项目，自动拉取最新的镜像并安全地更新服务，同时提供完整的回滚机制和健康检查。
 
-对于已启动的服务栈，更新流程如下：
-- 拉取镜像
-- 比较镜像 ID
-- 仅重新创建发生变化的服务
-- 验证服务健康状态
-- 失败时仅回滚发生变化的服务
+## 🎯 核心特性
 
-**核心保证**：绝不会启动从未启动过的服务栈。
+- **智能更新检测**：只更新有新镜像的服务，避免不必要的重启
+- **安全回滚机制**：更新失败时自动回滚到之前的版本
+- **健康状态验证**：确保更新后的服务正常运行
+- **灵活调度**：支持定时任务（cron）或间隔执行
+- **手动控制模式**：运行一次后立即退出，适合集成到 CI/CD
+- **详细日志输出**：实时显示操作进度和状态
+- **钉钉通知**：支持钉钉 webhook 通知更新结果
+- **报告生成**：每次运行都会生成详细的 JSON 报告
 
-## 服务栈发现与过滤
+## 🚀 快速开始
 
-设置 `COMPOSE_ROOT`（容器内路径）作为服务栈的根目录。每次运行时会扫描：
+### 使用 Docker Compose 部署
 
-- `COMPOSE_ROOT/(docker-)compose.yml|yaml`
-- `COMPOSE_ROOT/*/(docker-)compose.yml|yaml`
+1. **创建配置文件**
 
-在执行任何 `pull/up` 操作之前，会检查服务栈是否已经启动：
+创建 `docker-compose.yml`：
 
-```bash
-docker compose -f <file> --project-directory <dir> ps -q --status running
+```yaml
+version: '3.8'
+services:
+  compose-guardian:
+    image: ghcr.io/jasonchio-cn/compose-guardian:latest
+    container_name: compose-guardian
+    volumes:
+      # 挂载 Docker socket 以管理容器
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 挂载您的 compose 项目目录（只读）
+      - /opt/compose/projects:/compose/projects:ro
+      # 挂载报告目录（可选）
+      - /opt/compose-guardian/reports:/reports
+    environment:
+      # 指定 compose 项目根目录
+      - COMPOSE_ROOT=/compose/projects
+      # 可选：设置更新调度（每小时检查一次）
+      - SCHEDULE_EVERY=1h
+      # 可选：忽略特定服务
+      - IGNORE_SERVICES=database,cache
+    restart: unless-stopped
 ```
 
-如果无输出，则跳过该服务栈。
-
-## 快速开始（Docker Compose）
-
-compose-guardian 需要访问宿主机的 Docker 引擎，因此必须挂载 Docker socket：`/var/run/docker.sock`。
-
-### 1. 复制示例文件并编辑：
+2. **启动服务**
 
 ```bash
-cp docker-compose.example.yml docker-compose.yml
-```
+# 创建必要的目录
+sudo mkdir -p /opt/compose/projects /opt/compose-guardian/reports
 
-### 2. 检查以下配置值：
-
-- `volumes` 包含 `/opt/compose/projects:/compose/projects:ro`（你的服务栈根目录，以只读方式挂载）
-- `COMPOSE_ROOT` 与容器内路径匹配（例如 `/compose/projects`）
-- `REPORT_DIR` 与报告卷挂载匹配（用于持久化 JSON 报告）
-
-### 3. 启动服务：
-
-```bash
+# 启动 Compose Guardian
 docker compose up -d
 ```
 
-### 调度配置：
+### 使用 Docker 命令部署
 
-- 如果设置了 `SCHEDULE_CRON`，则按 cron 表达式运行（5个字段：分钟 小时 日 月 星期）
-- 如果设置了 `SCHEDULE_EVERY`（且 `SCHEDULE_CRON` 为空），则按固定间隔运行
-- **如果两者都未设置，则运行一次后立即退出**（适合手动控制更新）
-
-## 推荐的目录结构
-
-**宿主机示例**：
-
-```text
-/opt/compose/projects/
-  stack-a/
-    docker-compose.yml
-    .env
-  stack-b/
-    compose.yml
+```bash
+docker run -d \
+  --name compose-guardian \
+  --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /opt/compose/projects:/compose/projects:ro \
+  -v /opt/compose-guardian/reports:/reports \
+  -e COMPOSE_ROOT=/compose/projects \
+  -e SCHEDULE_EVERY=1h \
+  ghcr.io/jasonchio-cn/compose-guardian:latest
 ```
 
-在容器内挂载为：`/compose/projects/...`。
+### 手动控制更新（运行一次后退出）
 
-**注意**：compose-guardian 使用 `--project-directory <compose file dir>` 运行 docker compose，因此 `.env`、`env_file:` 和相对路径都会从该目录解析。
-
-## 行为细节
-
-- **更新检测**：运行 `docker compose pull`，然后通过 `docker image inspect <image> .Id` 比较镜像 ID
-- **安全性**：如果拉取前后镜像 ID 缺失（例如镜像不存在），该服务不被视为已更改
-- **应用更新**：如果有服务发生更改，运行 `docker compose up -d --force-recreate --no-deps <changed...>`
-- **验证机制**：
-  - 如果容器有 `HEALTHCHECK`，等待状态变为 `healthy` 和 `running`
-  - 否则要求 `running` 状态且 `RestartCount` 在 `STABLE_SECONDS` 时间内保持稳定
-- **回滚机制**：使用临时备份标签恢复已更改的服务，然后重新创建这些服务
-- **清理机制**：成功时删除备份标签；仅在没有容器引用时删除旧的镜像 ID
-- **通知机制**：发送钉钉通知（SUCCESS/ROLLBACK/FAILED）；SKIPPED 状态不通知
-- **报告机制**：每次运行后向 `REPORT_DIR` 写入 JSON 格式的报告
-
-## 手动控制更新（运行一次后退出）
-
-当你需要手动控制更新时机时，可以不设置任何调度参数：
+如果您希望完全控制更新时机（比如在 CI/CD 流水线中），可以不设置调度参数：
 
 ```yaml
+# docker-compose.yml - 手动模式
+version: '3.8'
 services:
   compose-guardian:
     image: ghcr.io/jasonchio-cn/compose-guardian:latest
@@ -99,34 +86,158 @@ services:
       - /opt/compose/projects:/compose/projects:ro
       - /opt/compose-guardian/reports:/reports
     environment:
-      COMPOSE_ROOT: /compose/projects
-      # 不设置 SCHEDULE_CRON 和 SCHEDULE_EVERY
-    # 容器运行一次更新后自动退出
+      - COMPOSE_ROOT=/compose/projects
+      # 注意：不设置 SCHEDULE_CRON 和 SCHEDULE_EVERY
+    # 不设置 restart，因为只需要运行一次
 ```
 
-然后你可以通过以下方式手动触发更新：
+然后手动触发更新：
 
 ```bash
-# 手动运行一次更新
+# 方式1：使用 docker compose run
 docker compose run --rm compose-guardian
 
-# 或者在现有容器中执行
-docker compose exec compose-guardian python -m compose_guardian.main
+# 方式2：直接执行容器内的命令
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /opt/compose/projects:/compose/projects:ro \
+  -v /opt/compose-guardian/reports:/reports \
+  -e COMPOSE_ROOT=/compose/projects \
+  ghcr.io/jasonchio-cn/compose-guardian:latest
 ```
 
-这种方式非常适合：
-- 集成到 CI/CD 流水线中
-- 需要人工确认后再更新的场景
-- 调试和测试更新流程
+## ⚙️ 环境变量配置
 
-## 配置参数（环境变量）
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `COMPOSE_ROOT` | `/compose/projects` | Compose 项目根目录 |
+| `SCHEDULE_CRON` | (空) | Cron 表达式，如 `"0 */6 * * *"` |
+| `SCHEDULE_EVERY` | (空) | 间隔时间，如 `"30m"`, `"2h"`, `"15s"` |
+| `IGNORE_SERVICES` | (空) | 要忽略的服务列表，用逗号分隔 |
+| `HEALTH_TIMEOUT_SECONDS` | `180` | 健康检查超时时间（秒） |
+| `STABLE_SECONDS` | `30` | 无健康检查服务的稳定时间（秒） |
+| `VERIFY_POLL_SECONDS` | `3` | 健康检查轮询间隔（秒） |
+| `DINGTALK_WEBHOOK` | (空) | 钉钉 webhook URL |
 
-- `COMPOSE_ROOT`（默认：`/compose/projects`）
-- `SCHEDULE_CRON`（可选，例如 `0 3 * * *`）
-- `SCHEDULE_EVERY`（可选，例如 `12h`、`30m`；仅在 `SCHEDULE_CRON` 为空时使用）
-- `IGNORE_SERVICES`（可选，逗号分隔的服务名列表）
-- `HEALTH_TIMEOUT_SECONDS`（默认：`180`）
-- `STABLE_SECONDS`（默认：`30`）
-- `VERIFY_POLL_SECONDS`（默认：`3`）
-- `REPORT_DIR`（默认：`/reports`）
-- `DINGTALK_WEBHOOK`（可选，钉钉机器人 webhook URL）
+### 调度配置说明
+
+- **不设置任何调度参数**：运行一次后立即退出（手动控制模式）
+- **设置 `SCHEDULE_EVERY`**：立即执行一次，然后按指定间隔重复
+- **设置 `SCHEDULE_CRON`**：按 cron 表达式定时执行
+
+> 💡 **注意**：`SCHEDULE_CRON` 和 `SCHEDULE_EVERY` 不能同时设置，优先使用 `SCHEDULE_CRON`。
+
+### 时间格式说明
+
+`SCHEDULE_EVERY` 支持以下格式：
+- `15s` - 15秒
+- `5m` - 5分钟  
+- `2h` - 2小时
+
+## 📁 目录结构要求
+
+Compose Guardian 会扫描 `COMPOSE_ROOT` 目录下的以下文件：
+
+```
+/compose/projects/
+├── docker-compose.yml          # 单个项目的 compose 文件
+├── project1/
+│   └── docker-compose.yml      # 多个项目，每个项目一个目录
+├── project2/
+│   └── compose.yaml
+└── my-app/
+    └── docker-compose.yaml
+```
+
+支持的文件名：
+- `docker-compose.yml`
+- `docker-compose.yaml`  
+- `compose.yml`
+- `compose.yaml`
+
+## 📊 运行报告
+
+每次运行都会在 `/reports` 目录下生成 JSON 格式的报告文件，包含：
+
+- 更新的服务列表
+- 镜像 ID 变化对比
+- 备份标签信息
+- 健康检查结果
+- 回滚状态（如果发生）
+
+## 🔔 钉钉通知
+
+配置 `DINGTALK_WEBHOOK` 环境变量即可启用钉钉通知。通知内容包括：
+
+- 更新状态（成功/失败/回滚）
+- 涉及的服务
+- 镜像变化详情
+
+## 🛡️ 安全机制
+
+1. **只更新有变化的服务**：避免不必要的服务重启
+2. **自动备份**：更新前为旧镜像打标签备份
+3. **健康验证**：确保新版本服务正常运行
+4. **自动回滚**：验证失败时自动恢复到之前版本
+5. **清理机制**：成功更新后自动清理备份镜像
+
+## 📝 使用示例
+
+### 场景1：自动定时更新
+
+```yaml
+environment:
+  - COMPOSE_ROOT=/compose/projects
+  - SCHEDULE_EVERY=6h  # 每6小时检查一次
+  - IGNORE_SERVICES=database,redis  # 忽略数据库和缓存服务
+```
+
+### 场景2：CI/CD 集成
+
+```bash
+# 在 GitHub Actions 或其他 CI 中
+- name: Update services
+  run: |
+    docker run --rm \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v ${{ github.workspace }}:/compose/projects:ro \
+      -e COMPOSE_ROOT=/compose/projects \
+      ghcr.io/jasonchio-cn/compose-guardian:latest
+```
+
+### 场景3：手动触发更新
+
+```bash
+# 临时更新所有服务
+docker compose run --rm compose-guardian
+
+# 查看更新报告
+ls -la /opt/compose-guardian/reports/
+cat /opt/compose-guardian/reports/latest.json
+```
+
+## 🐳 开发与构建
+
+```bash
+# 克隆项目
+git clone https://github.com/jasonchio-cn/compose-guardian.git
+cd compose-guardian
+
+# 构建镜像
+docker build -t compose-guardian .
+
+# 本地测试
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v ./test-projects:/compose/projects:ro \
+  -e COMPOSE_ROOT=/compose/projects \
+  compose-guardian
+```
+
+## 📄 许可证
+
+MIT License - 详情请查看 [LICENSE](LICENSE) 文件。
+
+---
+
+> **提示**：首次使用建议先在测试环境中验证，确保您的服务能够正确处理更新和回滚操作。
