@@ -3,7 +3,6 @@ import logging
 import os
 import subprocess
 import time
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -234,7 +233,7 @@ def _dingtalk_send(title: str, text: str) -> None:
         return
 
 
-def _run_once_for_compose(compose_file: str) -> None:
+def _run_once_for_compose(compose_file: str) -> Report:
     ignore = _ignore_set()
     ts_compact = datetime.now().strftime("%Y%m%dT%H%M%S")
     stack = _stack_name(compose_file)
@@ -256,7 +255,7 @@ def _run_once_for_compose(compose_file: str) -> None:
             report.message = "stack not up (no running containers)"
             logger.info(f"跳过 {stack}: 堆栈未启动（没有运行中的容器）")
             write_report(report)
-            return
+            return report
 
         services_images = _get_services_images(compose_file)
         for svc in list(services_images.keys()):
@@ -271,7 +270,7 @@ def _run_once_for_compose(compose_file: str) -> None:
             report.message = "no services with image after applying ignore list"
             logger.info(f"跳过 {stack}: 应用忽略列表后没有带镜像的服务")
             write_report(report)
-            return
+            return report
 
         before_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
         report.before_image_ids = before_ids
@@ -306,7 +305,7 @@ def _run_once_for_compose(compose_file: str) -> None:
                 report.message = "no image updates detected"
                 logger.info(f"跳过 {stack}: 未检测到镜像更新")
             write_report(report)
-            return
+            return report
 
         # Backup old images for changed services.
         logger.info(f"检测到 {len(changed)} 个服务需要更新: {', '.join(changed)}")
@@ -352,12 +351,8 @@ def _run_once_for_compose(compose_file: str) -> None:
             report.status = "ROLLBACK" if rok else "FAILED"
 
             write_report(report)
-
-            title = f"[{stack}] Compose Update {report.status}"
-            text = _format_dingtalk(report)
-            _dingtalk_send(title, text)
             logger.info(f"更新流程完成: {report.status}")
-            return
+            return report
 
         # Success: cleanup backup tags and old images.
         logger.info(f"更新成功，正在清理备份镜像...")
@@ -375,26 +370,22 @@ def _run_once_for_compose(compose_file: str) -> None:
 
         report.status = "SUCCESS"
         write_report(report)
-
-        title = f"[{stack}] Compose Update SUCCESS"
-        text = _format_dingtalk(report)
-        _dingtalk_send(title, text)
         logger.info(f"更新流程完成: SUCCESS")
+        return report
 
     except Exception as e:
         report.status = "FAILED"
         report.message = f"exception: {type(e).__name__}: {e}"
         write_report(report)
-
-        title = f"[{stack}] Compose Update FAILED"
-        text = _format_dingtalk(report)
-        _dingtalk_send(title, text)
+        return report
 
 
 def run_once() -> None:
     root = os.getenv("COMPOSE_ROOT", "/compose/projects").strip() or "/compose/projects"
     logger.info(f"开始扫描 compose 文件，根目录: {root}")
     compose_files = _discover_compose_files(root)
+
+    reports: List[Report] = []
 
     if not compose_files:
         logger.warning(f"未找到任何 compose 文件，COMPOSE_ROOT={root}")
@@ -407,12 +398,16 @@ def run_once() -> None:
             message=f"no compose files found under COMPOSE_ROOT={root}",
         )
         write_report(report)
-        return
+        reports.append(report)
+    else:
+        logger.info(f"发现 {len(compose_files)} 个 compose 文件: {[os.path.basename(f) for f in compose_files]}")
+        for compose_file in compose_files:
+            reports.append(_run_once_for_compose(compose_file))
 
-    logger.info(f"发现 {len(compose_files)} 个 compose 文件: {[os.path.basename(f) for f in compose_files]}")
-    for compose_file in compose_files:
-        _run_once_for_compose(compose_file)
     logger.info("所有 compose 文件处理完成")
+
+    # Send a single summary notification per run.
+    _dingtalk_send(_summary_title(reports), _format_dingtalk_summary(reports))
 
 
 def _format_dingtalk(report: Report) -> str:
@@ -438,4 +433,68 @@ def _format_dingtalk(report: Report) -> str:
             a = (report.after_image_ids or {}).get(svc, "")
             if b and a and b != a:
                 lines.append(f"- {svc}: {b} -> {a}")
+    return "\n".join(lines)
+
+
+def _summary_title(reports: List[Report]) -> str:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    ok = sum(1 for r in reports if r.status == "SUCCESS")
+    rollback = sum(1 for r in reports if r.status == "ROLLBACK")
+    failed = sum(1 for r in reports if r.status == "FAILED")
+    skipped = sum(1 for r in reports if r.status == "SKIPPED")
+
+    total = len(reports)
+    if failed:
+        overall = "FAILED"
+    elif rollback:
+        overall = "ROLLBACK"
+    elif ok:
+        overall = "SUCCESS"
+    else:
+        overall = "SKIPPED"
+
+    return f"Compose Guardian Run {overall} ({ts}) total={total} ok={ok} rollback={rollback} failed={failed} skipped={skipped}"
+
+
+def _format_dingtalk_summary(reports: List[Report]) -> str:
+    # One markdown message for the whole run.
+    lines: List[str] = []
+
+    ok = [r for r in reports if r.status == "SUCCESS"]
+    rb = [r for r in reports if r.status == "ROLLBACK"]
+    failed = [r for r in reports if r.status == "FAILED"]
+    skipped = [r for r in reports if r.status == "SKIPPED"]
+
+    if failed:
+        overall = "FAILED"
+    elif rb:
+        overall = "ROLLBACK"
+    elif ok:
+        overall = "SUCCESS"
+    else:
+        overall = "SKIPPED"
+
+    lines.append(f"### Run Summary: {overall}")
+    lines.append("")
+    lines.append(
+        "- totals: ok=%d, rollback=%d, failed=%d, skipped=%d" % (len(ok), len(rb), len(failed), len(skipped))
+    )
+    lines.append("")
+
+    # Per-stack compact section.
+    for r in reports:
+        stack = _stack_name(r.compose_file)
+        changed = ", ".join(r.changed_services) if r.changed_services else "-"
+        lines.append(f"#### {stack}: {r.status}")
+        lines.append(f"- compose: `{r.compose_file}`")
+        lines.append(f"- changed: {changed}")
+        if r.message:
+            lines.append(f"- message: {r.message}")
+        if r.verify_message:
+            lines.append(f"- verify: {r.verify_ok} ({r.verify_message})")
+        if r.rollback_verify_message:
+            lines.append(f"- rollback_verify: {r.rollback_verify_ok} ({r.rollback_verify_message})")
+        lines.append("")
+
     return "\n".join(lines)
