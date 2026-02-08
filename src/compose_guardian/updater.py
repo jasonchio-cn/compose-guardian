@@ -10,8 +10,7 @@ from .reporting import Report, write_report
 
 # 配置日志
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,9 @@ def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _run(cmd: List[str], *, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
+def _run(
+    cmd: List[str], *, check: bool = True, capture: bool = True
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         check=check,
@@ -44,11 +45,20 @@ def _stack_name(compose_file: str) -> str:
 
 
 def _compose_base(compose_file: str) -> List[str]:
-    base = ["docker", "compose", "--project-directory", os.path.dirname(compose_file), "-f", compose_file]
+    base = [
+        "docker",
+        "compose",
+        "--project-directory",
+        os.path.dirname(compose_file),
+        "-f",
+        compose_file,
+    ]
     return base
 
 
-def _compose(compose_file: str, cmd: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
+def _compose(
+    compose_file: str, cmd: List[str], *, check: bool = True
+) -> subprocess.CompletedProcess:
     return _run(_compose_base(compose_file) + cmd, check=check)
 
 
@@ -127,7 +137,9 @@ def _get_services_images(compose_file: str) -> Dict[str, str]:
     return out
 
 
-def _service_container_ids(compose_file: str, services: List[str]) -> Dict[str, List[str]]:
+def _service_container_ids(
+    compose_file: str, services: List[str]
+) -> Dict[str, List[str]]:
     out: Dict[str, List[str]] = {}
     for svc in services:
         p = _compose(compose_file, ["ps", "-q", svc], check=False)
@@ -143,7 +155,7 @@ def _inspect_container(cid: str) -> dict:
 
 
 def _container_health_info(ins: dict) -> Tuple[str, Optional[str], int]:
-    state = (ins.get("State") or {})
+    state = ins.get("State") or {}
     status = state.get("Status") or ""
     health = None
     if state.get("Health") and isinstance(state.get("Health"), dict):
@@ -272,13 +284,17 @@ def _run_once_for_compose(compose_file: str) -> Report:
             write_report(report)
             return report
 
-        before_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
+        before_ids: Dict[str, str] = {
+            svc: _image_id(img) for svc, img in services_images.items()
+        }
         report.before_image_ids = before_ids
 
         logger.info(f"正在拉取最新镜像...")
         _compose(compose_file, ["pull"], check=False)
 
-        after_ids: Dict[str, str] = {svc: _image_id(img) for svc, img in services_images.items()}
+        after_ids: Dict[str, str] = {
+            svc: _image_id(img) for svc, img in services_images.items()
+        }
         report.after_image_ids = after_ids
 
         changed: List[str] = []
@@ -297,10 +313,13 @@ def _run_once_for_compose(compose_file: str) -> Report:
         if not changed:
             report.status = "SKIPPED"
             if skipped_no_id:
-                report.message = "no image updates detected (some services missing image id: %s)" % ",".join(
-                    skipped_no_id
+                report.message = (
+                    "no image updates detected (some services missing image id: %s)"
+                    % ",".join(skipped_no_id)
                 )
-                logger.info(f"跳过 {stack}: 未检测到镜像更新（某些服务缺少镜像ID: {', '.join(skipped_no_id)}）")
+                logger.info(
+                    f"跳过 {stack}: 未检测到镜像更新（某些服务缺少镜像ID: {', '.join(skipped_no_id)}）"
+                )
             else:
                 report.message = "no image updates detected"
                 logger.info(f"跳过 {stack}: 未检测到镜像更新")
@@ -323,7 +342,11 @@ def _run_once_for_compose(compose_file: str) -> Report:
 
         # Apply update for changed services only.
         logger.info(f"正在更新服务: {', '.join(changed)}")
-        _compose(compose_file, ["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
+        _compose(
+            compose_file,
+            ["up", "-d", "--force-recreate", "--no-deps"] + changed,
+            check=False,
+        )
 
         logger.info(f"正在验证服务健康状态...")
         ok, why = _verify_services(compose_file, changed)
@@ -344,7 +367,11 @@ def _run_once_for_compose(compose_file: str) -> Report:
                     _docker(["image", "tag", bid, img], check=False)
 
             logger.info(f"正在回滚服务: {', '.join(changed)}")
-            _compose(compose_file, ["up", "-d", "--force-recreate", "--no-deps"] + changed, check=False)
+            _compose(
+                compose_file,
+                ["up", "-d", "--force-recreate", "--no-deps"] + changed,
+                check=False,
+            )
             rok, rwhy = _verify_services(compose_file, changed)
             report.rollback_verify_ok = rok
             report.rollback_verify_message = rwhy
@@ -364,7 +391,9 @@ def _run_once_for_compose(compose_file: str) -> Report:
             old_id = before_ids.get(svc, "")
             if old_id:
                 # Only delete old image if no containers reference it.
-                ps = _docker(["ps", "-a", "--filter", f"ancestor={old_id}", "-q"], check=False)
+                ps = _docker(
+                    ["ps", "-a", "--filter", f"ancestor={old_id}", "-q"], check=False
+                )
                 if not (ps.stdout or "").strip():
                     _docker(["image", "rm", old_id], check=False)
 
@@ -400,7 +429,9 @@ def run_once() -> None:
         write_report(report)
         reports.append(report)
     else:
-        logger.info(f"发现 {len(compose_files)} 个 compose 文件: {[os.path.basename(f) for f in compose_files]}")
+        logger.info(
+            f"发现 {len(compose_files)} 个 compose 文件: {[os.path.basename(f) for f in compose_files]}"
+        )
         for compose_file in compose_files:
             reports.append(_run_once_for_compose(compose_file))
 
@@ -423,7 +454,9 @@ def _format_dingtalk(report: Report) -> str:
     if report.verify_message:
         lines.append(f"- verify: {report.verify_ok} ({report.verify_message})")
     if report.rollback_verify_message:
-        lines.append(f"- rollback_verify: {report.rollback_verify_ok} ({report.rollback_verify_message})")
+        lines.append(
+            f"- rollback_verify: {report.rollback_verify_ok} ({report.rollback_verify_message})"
+        )
     lines.append("")
     # Include a compact service diff
     if report.changed_services:
@@ -466,35 +499,56 @@ def _format_dingtalk_summary(reports: List[Report]) -> str:
     failed = [r for r in reports if r.status == "FAILED"]
     skipped = [r for r in reports if r.status == "SKIPPED"]
 
-    if failed:
-        overall = "FAILED"
-    elif rb:
-        overall = "ROLLBACK"
-    elif ok:
-        overall = "SUCCESS"
-    else:
-        overall = "SKIPPED"
+    # 状态中文映射
+    status_map = {
+        "SUCCESS": "成功",
+        "FAILED": "失败",
+        "ROLLBACK": "已回滚",
+        "SKIPPED": "无更新",
+    }
 
-    lines.append(f"### Run Summary: {overall}")
+    if failed:
+        overall = "失败"
+    elif rb:
+        overall = "已回滚"
+    elif ok:
+        overall = "成功"
+    else:
+        overall = "无更新"
+
+    lines.append(f"### 运行摘要: {overall}")
     lines.append("")
     lines.append(
-        "- totals: ok=%d, rollback=%d, failed=%d, skipped=%d" % (len(ok), len(rb), len(failed), len(skipped))
+        "- 统计: 成功=%d, 回滚=%d, 失败=%d, 无更新=%d"
+        % (len(ok), len(rb), len(failed), len(skipped))
     )
+
+    # 过滤掉 SKIPPED 状态的报告，只显示有实际变化的
+    active_reports = [r for r in reports if r.status != "SKIPPED"]
+
+    if not active_reports:
+        lines.append("")
+        lines.append("所有项目均无镜像更新。")
+        return "\n".join(lines)
+
     lines.append("")
 
-    # Per-stack compact section.
-    for r in reports:
+    # Per-stack compact section (only non-skipped).
+    for r in active_reports:
         stack = _stack_name(r.compose_file)
-        changed = ", ".join(r.changed_services) if r.changed_services else "-"
-        lines.append(f"#### {stack}: {r.status}")
-        lines.append(f"- compose: `{r.compose_file}`")
-        lines.append(f"- changed: {changed}")
+        status_cn = status_map.get(r.status, r.status)
+        lines.append(f"#### {stack}: {status_cn}")
+        lines.append(f"- 配置文件: `{r.compose_file}`")
+        if r.changed_services:
+            lines.append(f"- 更新服务: {', '.join(r.changed_services)}")
         if r.message:
-            lines.append(f"- message: {r.message}")
+            lines.append(f"- 信息: {r.message}")
         if r.verify_message:
-            lines.append(f"- verify: {r.verify_ok} ({r.verify_message})")
+            verify_status = "通过" if r.verify_ok else "失败"
+            lines.append(f"- 健康检查: {verify_status}")
         if r.rollback_verify_message:
-            lines.append(f"- rollback_verify: {r.rollback_verify_ok} ({r.rollback_verify_message})")
+            rollback_status = "通过" if r.rollback_verify_ok else "失败"
+            lines.append(f"- 回滚检查: {rollback_status}")
         lines.append("")
 
     return "\n".join(lines)
