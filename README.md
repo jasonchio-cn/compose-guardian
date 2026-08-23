@@ -117,6 +117,8 @@ docker run --rm \
 | `HEALTH_TIMEOUT_SECONDS` | `180` | 健康检查超时时间（秒） |
 | `STABLE_SECONDS` | `30` | 无健康检查服务的稳定时间（秒） |
 | `VERIFY_POLL_SECONDS` | `3` | 健康检查轮询间隔（秒） |
+| `VERIFY_LOG_TAIL_LINES` | `30` | 验证失败时写入 JSON 报告的每个容器末尾日志行数；设为 `0` 可关闭日志采集 |
+| `DINGTALK_DIAGNOSTIC_LOG_LINES` | `3` | 验证失败时发送到钉钉的每个容器末尾日志行数；设为 `0` 可关闭 |
 | `DINGTALK_WEBHOOK` | (空) | 钉钉 webhook URL |
 
 ### 调度配置说明
@@ -163,6 +165,7 @@ Compose Guardian 会扫描 `COMPOSE_ROOT` 目录下的以下文件：
 - 镜像 ID 变化对比
 - 备份标签信息
 - 健康检查结果
+- 健康检查失败时的容器状态、重启次数、健康检查输出和末尾日志
 - 回滚状态（如果发生）
 
 ## 🔔 钉钉通知

@@ -166,7 +166,72 @@ def _container_health_info(ins: dict) -> Tuple[str, Optional[str], int]:
     return status, health, int(restart_count)
 
 
-def _verify_services(compose_file: str, services: List[str]) -> Tuple[bool, str]:
+def _tail_lines(text: str, limit: int) -> List[str]:
+    if limit <= 0:
+        return []
+    return (text or "").strip().splitlines()[-limit:]
+
+
+def _health_log(ins: dict, limit: int = 3) -> List[Dict[str, object]]:
+    health = (ins.get("State") or {}).get("Health") or {}
+    entries = health.get("Log") or []
+    return [
+        {
+            "start": entry.get("Start", ""),
+            "end": entry.get("End", ""),
+            "exit_code": entry.get("ExitCode"),
+            "output": (entry.get("Output") or "").strip(),
+        }
+        for entry in entries[-limit:]
+    ]
+
+
+def _verify_diagnostics(compose_file: str, services: List[str]) -> Dict[str, List[dict]]:
+    """Collect the final container state before it is lost during rollback."""
+    log_lines = max(0, int(os.getenv("VERIFY_LOG_TAIL_LINES", "30")))
+    diagnostics: Dict[str, List[dict]] = {}
+
+    for svc in services:
+        # `ps -q` omits stopped containers on some Compose versions. Request all
+        # containers here so a crash loop still has useful evidence in the report.
+        p = _compose(compose_file, ["ps", "--all", "-q", svc], check=False)
+        cids = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
+        diagnostics[svc] = []
+        if not cids:
+            diagnostics[svc].append({"error": "no containers found"})
+            continue
+
+        for cid in cids:
+            try:
+                ins = _inspect_container(cid)
+                state = ins.get("State") or {}
+                status, health, restarts = _container_health_info(ins)
+                logs = _docker(["logs", "--tail", str(log_lines), cid], check=False)
+                diagnostics[svc].append(
+                    {
+                        "container_id": cid,
+                        "container_name": ins.get("Name", "").lstrip("/"),
+                        "status": status,
+                        "health": health,
+                        "restart_count": restarts,
+                        "started_at": state.get("StartedAt", ""),
+                        "finished_at": state.get("FinishedAt", ""),
+                        "error": state.get("Error", ""),
+                        "exit_code": state.get("ExitCode"),
+                        "health_log": _health_log(ins),
+                        "log_tail": _tail_lines(
+                            (logs.stdout or "") + "\n" + (logs.stderr or ""), log_lines
+                        ),
+                    }
+                )
+            except Exception as exc:
+                diagnostics[svc].append({"container_id": cid, "error": str(exc)})
+    return diagnostics
+
+
+def _verify_services(
+    compose_file: str, services: List[str]
+) -> Tuple[bool, str, Dict[str, List[dict]]]:
     timeout = int(os.getenv("HEALTH_TIMEOUT_SECONDS", "180"))
     stable_seconds = int(os.getenv("STABLE_SECONDS", "30"))
     poll = int(os.getenv("VERIFY_POLL_SECONDS", "3"))
@@ -176,6 +241,7 @@ def _verify_services(compose_file: str, services: List[str]) -> Tuple[bool, str]
     # For no-healthcheck containers we require RestartCount to remain stable for stable_seconds.
     stable_since: Dict[str, float] = {}
     restart_baseline: Dict[str, int] = {}
+    reason = "verification did not run"
 
     while time.time() - start <= timeout:
         svc_cids = _service_container_ids(compose_file, services)
@@ -218,11 +284,15 @@ def _verify_services(compose_file: str, services: List[str]) -> Tuple[bool, str]
                         continue
 
         if all_ok:
-            return True, "ok"
+            return True, "ok", {}
 
         time.sleep(poll)
 
-    return False, f"verify timeout after {timeout}s"
+    return (
+        False,
+        f"verify timeout after {timeout}s; last check: {reason or 'unknown'}",
+        _verify_diagnostics(compose_file, services),
+    )
 
 
 def _dingtalk_send(title: str, text: str) -> None:
@@ -349,9 +419,10 @@ def _run_once_for_compose(compose_file: str) -> Report:
         )
 
         logger.info(f"正在验证服务健康状态...")
-        ok, why = _verify_services(compose_file, changed)
+        ok, why, diagnostics = _verify_services(compose_file, changed)
         report.verify_ok = ok
         report.verify_message = why
+        report.verify_diagnostics = diagnostics
 
         if not ok:
             logger.warning(f"服务验证失败，开始回滚: {why}")
@@ -372,9 +443,10 @@ def _run_once_for_compose(compose_file: str) -> Report:
                 ["up", "-d", "--force-recreate", "--no-deps"] + changed,
                 check=False,
             )
-            rok, rwhy = _verify_services(compose_file, changed)
+            rok, rwhy, rollback_diagnostics = _verify_services(compose_file, changed)
             report.rollback_verify_ok = rok
             report.rollback_verify_message = rwhy
+            report.rollback_verify_diagnostics = rollback_diagnostics
             report.status = "ROLLBACK" if rok else "FAILED"
 
             write_report(report)
@@ -525,6 +597,7 @@ def _format_dingtalk_summary(reports: List[Report]) -> str:
 
     # 过滤掉 SKIPPED 状态的报告，只显示有实际变化的
     active_reports = [r for r in reports if r.status != "SKIPPED"]
+    dingtalk_log_lines = max(0, int(os.getenv("DINGTALK_DIAGNOSTIC_LOG_LINES", "3")))
 
     if not active_reports:
         lines.append("")
@@ -545,7 +618,30 @@ def _format_dingtalk_summary(reports: List[Report]) -> str:
             lines.append(f"- 信息: {r.message}")
         if r.verify_message:
             verify_status = "通过" if r.verify_ok else "失败"
-            lines.append(f"- 健康检查: {verify_status}")
+            lines.append(f"- 健康检查: {verify_status}（{r.verify_message}）")
+        if r.verify_diagnostics:
+            for svc, containers in r.verify_diagnostics.items():
+                for container in containers:
+                    if container.get("error") and not container.get("container_id"):
+                        lines.append(f"- 诊断 {svc}: {container['error']}")
+                        continue
+                    lines.append(
+                        "- 诊断 %s/%s: status=%s, health=%s, restarts=%s, exit=%s"
+                        % (
+                            svc,
+                            container.get("container_name", container.get("container_id", "?")),
+                            container.get("status", "?"),
+                            container.get("health") or "none",
+                            container.get("restart_count", "?"),
+                            container.get("exit_code", "?"),
+                        )
+                    )
+                    log_tail = container.get("log_tail") or []
+                    if dingtalk_log_lines and log_tail:
+                        lines.append(f"- {svc} 末尾日志：")
+                        lines.append("```")
+                        lines.extend(log_tail[-dingtalk_log_lines:])
+                        lines.append("```")
         if r.rollback_verify_message:
             rollback_status = "通过" if r.rollback_verify_ok else "失败"
             lines.append(f"- 回滚检查: {rollback_status}")

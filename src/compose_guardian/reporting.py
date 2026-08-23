@@ -25,9 +25,13 @@ class Report:
 
     verify_ok: Optional[bool] = None
     verify_message: str = ""
+    verify_diagnostics: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     rollback_verify_ok: Optional[bool] = None
     rollback_verify_message: str = ""
+    rollback_verify_diagnostics: Dict[str, List[Dict[str, Any]]] = field(
+        default_factory=dict
+    )
 
 
 def write_report(report: Report) -> str:
@@ -50,8 +54,10 @@ def write_report(report: Report) -> str:
         "backup_tags": report.backup_tags,
         "verify_ok": report.verify_ok,
         "verify_message": report.verify_message,
+        "verify_diagnostics": report.verify_diagnostics,
         "rollback_verify_ok": report.rollback_verify_ok,
         "rollback_verify_message": report.rollback_verify_message,
+        "rollback_verify_diagnostics": report.rollback_verify_diagnostics,
     }
 
     with open(path, "w", encoding="utf-8") as f:
