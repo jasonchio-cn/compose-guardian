@@ -14,6 +14,7 @@ FILENAMES = ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compo
 OVERRIDES = ('compose.override.yaml', 'compose.override.yml',
              'docker-compose.override.yaml', 'docker-compose.override.yml')
 IMAGE_ID = re.compile(r'^sha256:[0-9a-f]{64}$')
+LOCAL_UNUSED_KEEP = 2
 
 
 class CleanupError(RuntimeError):
@@ -73,9 +74,21 @@ def normalize_reference(reference):
     return reference
 
 
+def creation_order(image):
+    # Docker uses RFC3339Nano. Keep nanoseconds and compare absolute UTC times.
+    try:
+        match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})', image['created'])
+        if not match:
+            raise ValueError()
+        second = datetime.fromisoformat(match[1] + match[3]).astimezone(UTC)
+        return second, int((match[2] or '').ljust(9, '0')), image['id']
+    except (ValueError, TypeError, OverflowError):
+        raise CleanupError('Invalid local image creation timestamp; cleanup blocked') from None
+
+
 class Cleaner:
     def __init__(self, roots, state_dir, *, manifest=None, path_maps=(),
-                 keep_prefixes=('local/',), runner=None):
+                 keep_prefixes=(), runner=None):
         self.roots = tuple(str(Path(root).resolve()) for root in roots)
         self.state_dir = Path(state_dir).resolve()
         self.manifest = str(Path(manifest).resolve()) if manifest else None
@@ -87,7 +100,7 @@ class Cleaner:
     def scope(self):
         return {'roots': self.roots, 'state_dir': str(self.state_dir),
                 'manifest': self.manifest, 'path_maps': self.path_maps,
-                'keep_prefixes': self.keep_prefixes}
+                'keep_prefixes': self.keep_prefixes, 'local_unused_keep': LOCAL_UNUSED_KEEP}
 
     def _json(self, arguments):
         try:
@@ -269,19 +282,45 @@ class Cleaner:
             for reference in state['references']:
                 protect(reference, 'guardian-state')
         for identifier, image in images.items():
-            if any(normalize_reference(tag).startswith(prefix) for tag in image['tags'] for prefix in self.keep_prefixes):
-                protect(identifier, 'local-prefix')
-        pending = list(protected)
-        while pending:
-            parent = images[pending.pop()].get('parent')
-            if parent in images and parent not in protected:
-                protected[parent] = {'protected-image-ancestor'}
-                pending.append(parent)
+            for prefix in self.keep_prefixes:
+                if any(normalize_reference(tag).startswith(prefix) for tag in image['tags']):
+                    protect(identifier, 'keep-prefix:' + prefix)
+
+        def protect_ancestors():
+            pending = list(protected)
+            while pending:
+                parent = images[pending.pop()].get('parent')
+                if parent in images and parent not in protected:
+                    protected[parent] = {'protected-image-ancestor'}
+                    pending.append(parent)
+
+        # Required references and their ancestors never consume the extra history quota.
+        protect_ancestors()
+        repositories = {}
+        for identifier, image in images.items():
+            if identifier in protected:
+                continue
+            for tag in image['tags']:
+                reference = normalize_reference(tag)
+                if reference.startswith('local/'):
+                    repository = reference.rsplit(':', 1)[0]
+                    repositories.setdefault(repository, set()).add(identifier)
+        local_history = {}
+        # Select independently per repository, then union the protected IDs.
+        for repository, identifiers in sorted(repositories.items()):
+            ordered = sorted(identifiers, key=lambda key: creation_order(images[key]), reverse=True)
+            retained = ordered[:LOCAL_UNUSED_KEEP]
+            local_history[repository] = {'retained_unused_ids': retained,
+                                         'older_unused_ids': ordered[LOCAL_UNUSED_KEEP:]}
+            for identifier in retained:
+                protect(identifier, 'local-history:' + repository)
+        protect_ancestors()
         candidates = [image for identifier, image in images.items() if identifier not in protected]
         return {'schema': 1, 'created': datetime.now(UTC).isoformat(), 'scope': self.scope,
                 'daemon': snapshot['daemon'], 'fingerprint': fingerprint(snapshot),
                 'candidates': sorted(candidates, key=lambda row: row['id']),
                 'protected': {identifier: sorted(reasons) for identifier, reasons in sorted(protected.items())},
+                'local_history': local_history,
                 'missing_cached_references': sorted(missing),
                 'container_count': len(snapshot['containers']), 'volume_count': len(snapshot['volumes'])}
 
@@ -346,7 +385,7 @@ def main():
     parser.add_argument('--manifest', help='explicit project names/directories/file combinations (core manifest format)')
     parser.add_argument('--state-dir', default=os.getenv('GUARDIAN_STATE_DIR', os.getenv('REPORT_DIR', '/reports')))
     parser.add_argument('--path-map', action='append', default=[], metavar='HOST_PREFIX=VISIBLE_PREFIX')
-    parser.add_argument('--keep-prefix', action='append', default=['local/'])
+    parser.add_argument('--keep-prefix', action='append', default=[], help='always retain every image matching this prefix, overriding local history retention')
     parser.add_argument('--plan', required=True, help='preview JSON path; required input for --apply')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--allow-multi-tag', action='store_true', help='permit immutable-ID force removal of approved multi-alias images; quiesce other Docker writers first')

@@ -114,6 +114,131 @@ class CleanupTests(unittest.TestCase):
         self.fake.images[ident(5)]['RepoTags'] += ['docker.io/local/custom:backup']
         self.assertNotIn(ident(5), self.plan_ids())
 
+    def add_local(self, number, repository='app', *, tags=None, created=None, parent=''):
+        row = image(number, tags or [f'local/{repository}:v{number}'], parent=parent)
+        if created is not None:
+            row['Created'] = created
+        self.fake.images[row['Id']] = row
+
+    def test_local_history_keeps_only_two_newest_unused_ids_per_repository(self):
+        for number in range(6, 10):
+            self.add_local(number)
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/app'], {
+            'retained_unused_ids': [ident(9), ident(8)],
+            'older_unused_ids': [ident(7), ident(6)],
+        })
+        self.assertEqual({ident(6), ident(7)} & self.plan_ids(), {ident(6), ident(7)})
+        self.assertFalse({ident(8), ident(9)} & self.plan_ids())
+        self.assertFalse(any(command[:2] == ['image', 'rm'] for command in self.fake.calls))
+
+    def test_referenced_local_versions_do_not_consume_extra_history_quota(self):
+        for number in range(6, 12):
+            self.add_local(number)
+        self.fake.containers.append({'Id': 'local-stopped', 'Name': '/local', 'Image': ident(6),
+                                     'Config': {'Image': 'local/app:v6'}, 'State': {'Status': 'exited'}})
+        self.fake.config['services']['local'] = {'image': 'local/app:v7'}
+        self.state_file({'current': ident(8)})
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/app']['retained_unused_ids'], [ident(11), ident(10)])
+        candidates = {row['id'] for row in plan['candidates']}
+        self.assertIn(ident(9), candidates)
+        self.assertFalse({ident(n) for n in (6, 7, 8, 10, 11)} & candidates)
+
+    def test_multiple_local_tags_count_as_one_id_and_registry_aliases_are_normalized(self):
+        self.add_local(6)
+        self.add_local(7)
+        self.add_local(8, tags=['local/app:v8', 'docker.io/local/app:latest', 'remote/app:copy'])
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/app']['retained_unused_ids'], [ident(8), ident(7)])
+        self.assertIn(ident(6), {row['id'] for row in plan['candidates']})
+        self.assertNotIn('docker.io/local/app', plan['local_history'])
+
+    def test_each_local_repository_has_an_independent_history_quota(self):
+        for number, repository in ((6, 'a'), (7, 'a'), (8, 'a'), (9, 'b'), (10, 'b'), (11, 'b')):
+            self.add_local(number, repository)
+        candidates = self.plan_ids()
+        self.assertTrue({ident(6), ident(9)} <= candidates)
+        self.assertFalse({ident(n) for n in (7, 8, 10, 11)} & candidates)
+
+    def test_id_shared_between_repositories_is_retained_if_either_repository_needs_it(self):
+        self.add_local(6, 'a')
+        self.add_local(7, 'a')
+        self.add_local(8, tags=['local/a:v8', 'local/b:v8'])
+        self.add_local(9, 'b')
+        self.add_local(10, 'b')
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/b']['retained_unused_ids'], [ident(10), ident(9)])
+        self.assertEqual(plan['local_history']['local/b']['older_unused_ids'], [ident(8)])
+        self.assertNotIn(ident(8), {row['id'] for row in plan['candidates']})
+        self.assertIn('local-history:local/a', plan['protected'][ident(8)])
+
+    def test_required_ancestor_does_not_consume_extra_local_history_quota(self):
+        for number in range(6, 10):
+            self.add_local(number)
+        self.fake.images[ident(1)]['Parent'] = ident(6)
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/app']['retained_unused_ids'], [ident(9), ident(8)])
+        self.assertEqual(plan['local_history']['local/app']['older_unused_ids'], [ident(7)])
+        self.assertIn('protected-image-ancestor', plan['protected'][ident(6)])
+
+    def test_history_ancestors_are_retained_even_when_they_exceed_two_ids(self):
+        self.add_local(6)
+        self.add_local(7)
+        self.add_local(8, parent=ident(6))
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/app']['older_unused_ids'], [ident(6)])
+        self.assertIn('protected-image-ancestor', plan['protected'][ident(6)])
+        self.assertFalse({ident(6), ident(7), ident(8)} & self.plan_ids())
+
+    def test_local_history_creation_order_uses_utc_and_nanoseconds(self):
+        self.add_local(6, created='2026-10-17T10:00:00+08:00')
+        self.add_local(7, created='2026-10-17T03:00:00Z')
+        self.add_local(8, created='2026-10-17T02:30:00Z')
+        self.assertIn(ident(6), self.plan_ids())
+        self.fake.images[ident(6)]['Created'] = '2026-10-17T03:00:00.000000011Z'
+        self.fake.images[ident(7)]['Created'] = '2026-10-17T03:00:00.000000010Z'
+        self.fake.images[ident(8)]['Created'] = '2026-10-17T03:00:00.000000009Z'
+        plan = self.cleaner.plan()
+        self.assertEqual(plan['local_history']['local/app']['retained_unused_ids'], [ident(6), ident(7)])
+        self.assertIn(ident(8), {row['id'] for row in plan['candidates']})
+
+    def test_equal_creation_times_have_a_stable_id_tiebreaker(self):
+        for number in (8, 6, 7):
+            self.add_local(number, created='2026-10-17T03:00:00Z')
+        self.assertEqual(self.cleaner.plan()['local_history']['local/app']['retained_unused_ids'], [ident(8), ident(7)])
+
+    def test_bad_local_creation_timestamp_blocks_preview(self):
+        self.add_local(6)
+        for created in ('unknown', None, '2026-13-17T03:00:00Z', '0001-01-01T00:00:00+08:00'):
+            with self.subTest(created=created):
+                self.fake.images[ident(6)]['Created'] = created
+                with self.assertRaisesRegex(CleanupError, 'creation timestamp'):
+                    self.cleaner.plan()
+        self.assertFalse(any(command[:2] == ['image', 'rm'] for command in self.fake.calls))
+
+    def test_explicit_keep_prefix_can_still_retain_all_local_versions(self):
+        for number in range(6, 10):
+            self.add_local(number)
+        cleaner = Cleaner([self.projects], self.state, keep_prefixes=('local/',), runner=self.fake)
+        plan = cleaner.plan()
+        self.assertFalse({ident(n) for n in range(6, 10)} & {row['id'] for row in plan['candidates']})
+        self.assertIn('keep-prefix:local/', plan['protected'][ident(6)])
+
+    def test_preview_from_before_local_retention_policy_is_rejected(self):
+        plan = self.cleaner.plan()
+        del plan['scope']['local_unused_keep']
+        self.assertEqual(self.cleaner.apply(plan)['status'], 'failed')
+        self.assertFalse(any(command[:2] == ['image', 'rm'] for command in self.fake.calls))
+
+    def test_apply_keeps_the_same_two_local_ids_after_each_old_version_is_removed(self):
+        for number in range(6, 11):
+            self.add_local(number)
+        result = self.cleaner.apply(self.cleaner.plan())
+        self.assertEqual(result['status'], 'complete')
+        self.assertEqual(set(result['removed']), {ident(n) for n in (2, 5, 6, 7, 8)})
+        self.assertTrue({ident(3), ident(9), ident(10)} <= set(self.fake.images))
+
     def test_container_mutable_reference_protects_new_cached_target(self):
         self.fake.containers[0]['Config']['Image'] = 'remote/app:old'
         self.assertNotIn(ident(5), self.plan_ids())
