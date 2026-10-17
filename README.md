@@ -243,6 +243,14 @@ docker run --rm \
   compose-guardian
 ```
 
+## 镜像空间清理（独立、手动入口）
+
+使用 `python -m compose_guardian.image_cleanup --compose-root /compose/projects --state-dir /reports --plan /reports/image-cleanup-plan.json` 生成预览，确认后用相同参数加 `--apply` 执行。
+
+默认保留所有容器（含停止中）的镜像、当前 Compose 引用、`local/*` 自建镜像、Guardian 回滚记录和受保护镜像的父镜像。不会清理容器或数据卷，也不会启动业务服务。没有新增定时任务。多别名旧镜像默认跳过，详细保留规则、并发限制和执行选项见 [镜像清理说明](docs/image-cleanup.md)。
+
+旧更新入口和清理使用同一 `guardian.lock`；新核心的 `--state-dir` 应与 `GUARDIAN_STATE_DIR`/`REPORT_DIR` 一致，避免更新与清理相互干扰。
+
 ## 📄 许可证
 
 MIT License - 详情请查看 [LICENSE](LICENSE) 文件。

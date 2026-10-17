@@ -482,6 +482,18 @@ def _run_once_for_compose(compose_file: str) -> Report:
 
 
 def run_once() -> None:
+    # Serialize against explicit image cleanup and the opt-in reliability core.
+    from .core import round_lock
+
+    state_dir = os.getenv("GUARDIAN_STATE_DIR", os.getenv("REPORT_DIR", "/reports"))
+    try:
+        with round_lock(os.path.join(state_dir, "guardian.lock")):
+            _run_once_unlocked()
+    except BlockingIOError:
+        logger.info("已有更新或镜像清理任务运行，跳过本轮更新")
+
+
+def _run_once_unlocked() -> None:
     root = os.getenv("COMPOSE_ROOT", "/compose/projects").strip() or "/compose/projects"
     logger.info(f"开始扫描 compose 文件，根目录: {root}")
     compose_files = _discover_compose_files(root)
